@@ -4,7 +4,7 @@
 // Released under the MIT license.
 
 // Wrapper around the GCO cross compiler docker container.
-package main // import "src.techknowlogick.com/xgo"
+package main
 
 import (
 	"bytes"
@@ -31,16 +31,12 @@ func init() {
 		depsCache = filepath.Join(home, ".xgo-cache")
 		return
 	}
-	if usr, err := user.Current(); usr != nil && err == nil && usr.HomeDir != "" {
-		depsCache = filepath.Join(usr.HomeDir, ".xgo-cache")
+	if user, err := user.Current(); user != nil && err == nil && user.HomeDir != "" {
+		depsCache = filepath.Join(user.HomeDir, ".xgo-cache")
 		return
 	}
 	depsCache = filepath.Join(os.TempDir(), "xgo-cache")
 }
-
-// Cross compilation docker containers
-var dockerBase = "techknowlogick/xgo:base"
-var dockerDist = "techknowlogick/xgo:"
 
 // Command line arguments to fine tune the compilation
 var (
@@ -53,7 +49,7 @@ var (
 	crossDeps   = flag.String("deps", "", "CGO dependencies (configure/make based archives)")
 	crossArgs   = flag.String("depsargs", "", "CGO dependency configure arguments")
 	targets     = flag.String("targets", "*/*", "Comma separated targets to build for")
-	dockerImage = flag.String("image", "", "Use custom docker image instead of official distribution")
+	dockerImage = flag.String("image", "anjmao/xgo:latest", "Use custom docker image instead of official distribution")
 )
 
 // ConfigFlags is a simple set of flags to define the environment and dependencies.
@@ -70,24 +66,22 @@ type ConfigFlags struct {
 
 // Command line arguments to pass to go build
 var (
-	buildVerbose  = flag.Bool("v", false, "Print the names of packages as they are compiled")
-	buildSteps    = flag.Bool("x", false, "Print the command as executing the builds")
-	buildRace     = flag.Bool("race", false, "Enable data race detection (supported only on amd64)")
-	buildTags     = flag.String("tags", "", "List of build tags to consider satisfied during the build")
-	buildLdFlags  = flag.String("ldflags", "", "Arguments to pass on each go tool link invocation")
-	buildMode     = flag.String("buildmode", "default", "Indicates which kind of object file to build")
-	buildTrimpath = flag.Bool("trimpath", false, "Indicates if trimpath should be applied to build")
+	buildVerbose = flag.Bool("v", false, "Print the names of packages as they are compiled")
+	buildSteps   = flag.Bool("x", false, "Print the command as executing the builds")
+	buildRace    = flag.Bool("race", false, "Enable data race detection (supported only on amd64)")
+	buildTags    = flag.String("tags", "", "List of build tags to consider satisfied during the build")
+	buildLdFlags = flag.String("ldflags", "", "Arguments to pass on each go tool link invocation")
+	buildMode    = flag.String("buildmode", "default", "Indicates which kind of object file to build")
 )
 
 // BuildFlags is a simple collection of flags to fine tune a build.
 type BuildFlags struct {
-	Verbose  bool   // Print the names of packages as they are compiled
-	Steps    bool   // Print the command as executing the builds
-	Race     bool   // Enable data race detection (supported only on amd64)
-	Tags     string // List of build tags to consider satisfied during the build
-	LdFlags  string // Arguments to pass on each go tool link invocation
-	Mode     string // Indicates which kind of object file to build
-	Trimpath bool   // Indicates if trimpath should be applied to build
+	Verbose bool   // Print the names of packages as they are compiled
+	Steps   bool   // Print the command as executing the builds
+	Race    bool   // Enable data race detection (supported only on amd64)
+	Tags    string // List of build tags to consider satisfied during the build
+	LdFlags string // Arguments to pass on each go tool link invocation
+	Mode    string // Indicates which kind of object file to build
 }
 
 func main() {
@@ -110,11 +104,7 @@ func main() {
 		if len(flag.Args()) != 1 {
 			log.Fatalf("Usage: %s [options] <go import path>", os.Args[0])
 		}
-		// Select the image to use, either official or custom
-		image = dockerDist + *goVersion
-		if *dockerImage != "" {
-			image = *dockerImage
-		}
+		image = *dockerImage
 		// Check that all required images are available
 		found, err := checkDockerImage(image)
 		switch {
@@ -176,13 +166,12 @@ func main() {
 		Targets:      strings.Split(*targets, ","),
 	}
 	flags := &BuildFlags{
-		Verbose:  *buildVerbose,
-		Steps:    *buildSteps,
-		Race:     *buildRace,
-		Tags:     *buildTags,
-		LdFlags:  *buildLdFlags,
-		Mode:     *buildMode,
-		Trimpath: *buildTrimpath,
+		Verbose: *buildVerbose,
+		Steps:   *buildSteps,
+		Race:    *buildRace,
+		Tags:    *buildTags,
+		LdFlags: *buildLdFlags,
+		Mode:    *buildMode,
 	}
 	folder, err := os.Getwd()
 	if err != nil {
@@ -218,7 +207,7 @@ func checkDocker() error {
 // Checks whether a required docker image is available locally.
 func checkDockerImage(image string) (bool, error) {
 	fmt.Printf("Checking for required docker image %s... ", image)
-	out, err := exec.Command("docker", "images", "--no-trunc").Output()
+	out, err := exec.Command("docker", "images", "--format", "'{{.Repository}}:{{.Tag}}'", "--no-trunc").Output()
 	if err != nil {
 		return false, err
 	}
@@ -236,58 +225,49 @@ func pullDockerImage(image string) error {
 func compile(image string, config *ConfigFlags, flags *BuildFlags, folder string) error {
 	// If a local build was requested, find the import path and mount all GOPATH sources
 	locals, mounts, paths := []string{}, []string{}, []string{}
-	var usesModules bool
 	if strings.HasPrefix(config.Repository, string(filepath.Separator)) || strings.HasPrefix(config.Repository, ".") {
 		// Resolve the repository import path from the file path
 		config.Repository = resolveImportPath(config.Repository)
 
-		// Determine if this is a module-based repository
-		var modFile = config.Repository + "/go.mod"
-		_, err := os.Stat(modFile)
-		usesModules = !os.IsNotExist(err)
-
 		// Iterate over all the local libs and export the mount points
-		if os.Getenv("GOPATH") == "" && !usesModules {
+		if os.Getenv("GOPATH") == "" {
 			log.Fatalf("No $GOPATH is set or forwarded to xgo")
 		}
-		if !usesModules {
-			for _, gopath := range strings.Split(os.Getenv("GOPATH"), string(os.PathListSeparator)) {
-				// Since docker sandboxes volumes, resolve any symlinks manually
-				sources := filepath.Join(gopath, "src")
-				filepath.Walk(sources, func(path string, info os.FileInfo, err error) error {
-					// Skip any folders that errored out
-					if err != nil {
-						log.Printf("Failed to access GOPATH element %s: %v", path, err)
-						return nil
-					}
-					// Skip anything that's not a symlink
-					if info.Mode()&os.ModeSymlink == 0 {
-						return nil
-					}
-					// Resolve the symlink and skip if it's not a folder
-					target, err := filepath.EvalSymlinks(path)
-					if err != nil {
-						return nil
-					}
-					if info, err = os.Stat(target); err != nil || !info.IsDir() {
-						return nil
-					}
-					// Skip if the symlink points within GOPATH
-					if filepath.HasPrefix(target, sources) {
-						return nil
-					}
-
-					// Folder needs explicit mounting due to docker symlink security
-					locals = append(locals, target)
-					mounts = append(mounts, filepath.Join("/ext-go", strconv.Itoa(len(locals)), "src", strings.TrimPrefix(path, sources)))
-					paths = append(paths, filepath.Join("/ext-go", strconv.Itoa(len(locals))))
+		for _, gopath := range strings.Split(os.Getenv("GOPATH"), string(os.PathListSeparator)) {
+			// Since docker sandboxes volumes, resolve any symlinks manually
+			sources := filepath.Join(gopath, "src")
+			filepath.Walk(sources, func(path string, info os.FileInfo, err error) error {
+				// Skip any folders that errored out
+				if err != nil {
+					log.Printf("Failed to access GOPATH element %s: %v", path, err)
 					return nil
-				})
-				// Export the main mount point for this GOPATH entry
-				locals = append(locals, sources)
-				mounts = append(mounts, filepath.Join("/ext-go", strconv.Itoa(len(locals)), "src"))
+				}
+				// Skip anything that's not a symlink
+				if info.Mode()&os.ModeSymlink == 0 {
+					return nil
+				}
+				// Resolve the symlink and skip if it's not a folder
+				target, err := filepath.EvalSymlinks(path)
+				if err != nil {
+					return nil
+				}
+				if info, err = os.Stat(target); err != nil || !info.IsDir() {
+					return nil
+				}
+				// Skip if the symlink points within GOPATH
+				if filepath.HasPrefix(target, sources) {
+					return nil
+				}
+				// Folder needs explicit mounting due to docker symlink security
+				locals = append(locals, target)
+				mounts = append(mounts, filepath.Join("/ext-go", strconv.Itoa(len(locals)), "src", strings.TrimPrefix(path, sources)))
 				paths = append(paths, filepath.Join("/ext-go", strconv.Itoa(len(locals))))
-			}
+				return nil
+			})
+			// Export the main mount point for this GOPATH entry
+			locals = append(locals, sources)
+			mounts = append(mounts, filepath.Join("/ext-go", strconv.Itoa(len(locals)), "src"))
+			paths = append(paths, filepath.Join("/ext-go", strconv.Itoa(len(locals))))
 		}
 	}
 	// Assemble and run the cross compilation command
@@ -309,35 +289,12 @@ func compile(image string, config *ConfigFlags, flags *BuildFlags, folder string
 		"-e", fmt.Sprintf("FLAG_TAGS=%s", flags.Tags),
 		"-e", fmt.Sprintf("FLAG_LDFLAGS=%s", flags.LdFlags),
 		"-e", fmt.Sprintf("FLAG_BUILDMODE=%s", flags.Mode),
-		"-e", fmt.Sprintf("FLAG_TRIMPATH=%v", flags.Trimpath),
 		"-e", "TARGETS=" + strings.Replace(strings.Join(config.Targets, " "), "*", ".", -1),
 	}
-	if usesModules {
-		args = append(args, []string{"-e", "GO111MODULE=on"}...)
-		args = append(args, []string{"-v", os.Getenv("GOPATH") + ":/go"}...)
-
-		// Map this repository to the /source folder
-		absRepository, err := filepath.Abs(config.Repository)
-		if err != nil {
-			log.Fatalf("Failed to locate requested module repository: %v.", err)
-		}
-		args = append(args, []string{"-v", absRepository + ":/source"}...)
-
-		fmt.Printf("Enabled Go module support\n")
-
-		// Check whether it has a vendor folder, and if so, use it
-		vendorPath := absRepository + "/vendor"
-		vendorfolder, err := os.Stat(vendorPath)
-		if !os.IsNotExist(err) && vendorfolder.Mode().IsDir() {
-			args = append(args, []string{"-e", "FLAG_MOD=vendor"}...)
-			fmt.Printf("Using vendored Go module dependencies\n")
-		}
-	} else {
-		for i := 0; i < len(locals); i++ {
-			args = append(args, []string{"-v", fmt.Sprintf("%s:%s:ro", locals[i], mounts[i])}...)
-		}
-		args = append(args, []string{"-e", "EXT_GOPATH=" + strings.Join(paths, ":")}...)
+	for i := 0; i < len(locals); i++ {
+		args = append(args, []string{"-v", fmt.Sprintf("%s:%s:ro", locals[i], mounts[i])}...)
 	}
+	args = append(args, []string{"-e", "EXT_GOPATH=" + strings.Join(paths, ":")}...)
 
 	args = append(args, []string{image, config.Repository}...)
 	return run(exec.Command("docker", args...))
@@ -367,7 +324,6 @@ func compileContained(config *ConfigFlags, flags *BuildFlags, folder string) err
 		fmt.Sprintf("FLAG_TAGS=%s", flags.Tags),
 		fmt.Sprintf("FLAG_LDFLAGS=%s", flags.LdFlags),
 		fmt.Sprintf("FLAG_BUILDMODE=%s", flags.Mode),
-		fmt.Sprintf("FLAG_TRIMPATH=%v", flags.Trimpath),
 		"TARGETS=" + strings.Replace(strings.Join(config.Targets, " "), "*", ".", -1),
 	}
 	if local {

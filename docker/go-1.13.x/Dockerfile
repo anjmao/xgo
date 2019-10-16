@@ -3,4 +3,4 @@
 #
 # Released under the MIT license.
 
-FROM techknowlogick/xgo:go-1.13.1
+FROM anjmao/xgo:go-1.13.1
