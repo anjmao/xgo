@@ -39,28 +39,30 @@ func init() {
 
 // Command line arguments to fine tune the compilation
 var (
-	goVersion   = flag.String("go", "latest", "Go release to use for cross compilation")
-	srcPackage  = flag.String("pkg", "", "Sub-package to build if not root import")
-	srcRemote   = flag.String("remote", "", "Version control remote repository to build")
-	srcBranch   = flag.String("branch", "", "Version control branch to build")
-	outPrefix   = flag.String("out", "", "Prefix to use for output naming (empty = package name)")
-	outFolder   = flag.String("dest", "", "Destination folder to put binaries in (empty = current)")
-	crossDeps   = flag.String("deps", "", "CGO dependencies (configure/make based archives)")
-	crossArgs   = flag.String("depsargs", "", "CGO dependency configure arguments")
-	targets     = flag.String("targets", "*/*", "Comma separated targets to build for")
-	dockerImage = flag.String("image", "anjmao/xgo:latest", "Use custom docker image instead of official distribution")
+	goVersion         = flag.String("go", "latest", "Go release to use for cross compilation")
+	srcPackage        = flag.String("pkg", "", "Sub-package to build if not root import")
+	srcRemote         = flag.String("remote", "", "Version control remote repository to build")
+	srcBranch         = flag.String("branch", "", "Version control branch to build")
+	outPrefix         = flag.String("out", "", "Prefix to use for output naming (empty = package name)")
+	outFolder         = flag.String("dest", "", "Destination folder to put binaries in (empty = current)")
+	crossDeps         = flag.String("deps", "", "CGO dependencies (configure/make based archives)")
+	crossArgs         = flag.String("depsargs", "", "CGO dependency configure arguments")
+	targets           = flag.String("targets", "*/*", "Comma separated targets to build for")
+	dockerImage       = flag.String("image", "anjmao/xgo:latest", "Use custom docker image instead of official distribution")
+	useVendoredGOPATh = flag.Bool("use-vendored-gopath", false, "Use legacy GOPATH mode with vendor folder")
 )
 
 // ConfigFlags is a simple set of flags to define the environment and dependencies.
 type ConfigFlags struct {
-	Repository   string   // Root import path to build
-	Package      string   // Sub-package to build if not root import
-	Prefix       string   // Prefix to use for output naming
-	Remote       string   // Version control remote repository to build
-	Branch       string   // Version control branch to build
-	Dependencies string   // CGO dependencies (configure/make based archives)
-	Arguments    string   // CGO dependency configure arguments
-	Targets      []string // Targets to build for
+	Repository        string   // Root import path to build
+	Package           string   // Sub-package to build if not root import
+	Prefix            string   // Prefix to use for output naming
+	Remote            string   // Version control remote repository to build
+	Branch            string   // Version control branch to build
+	Dependencies      string   // CGO dependencies (configure/make based archives)
+	Arguments         string   // CGO dependency configure arguments
+	Targets           []string // Targets to build for
+	UseVendoredGOPATh bool     // Use legacy GOPATH mode with vendor folder
 }
 
 // Command line arguments to pass to go build
@@ -155,14 +157,15 @@ func main() {
 	}
 	// Assemble the cross compilation environment and build options
 	config := &ConfigFlags{
-		Repository:   flag.Args()[0],
-		Package:      *srcPackage,
-		Remote:       *srcRemote,
-		Branch:       *srcBranch,
-		Prefix:       *outPrefix,
-		Dependencies: *crossDeps,
-		Arguments:    *crossArgs,
-		Targets:      strings.Split(*targets, ","),
+		Repository:        flag.Args()[0],
+		Package:           *srcPackage,
+		Remote:            *srcRemote,
+		Branch:            *srcBranch,
+		Prefix:            *outPrefix,
+		Dependencies:      *crossDeps,
+		Arguments:         *crossArgs,
+		UseVendoredGOPATh: *useVendoredGOPATh,
+		Targets:           strings.Split(*targets, ","),
 	}
 	flags := &BuildFlags{
 		Verbose: *buildVerbose,
@@ -244,22 +247,34 @@ func compile(image string, config *ConfigFlags, flags *BuildFlags, folder string
 		"-e", "TARGETS=" + strings.Replace(strings.Join(config.Targets, " "), "*", ".", -1),
 	}
 
-	// Map this repository to the /source folder
 	absRepository, err := filepath.Abs(config.Repository)
 	if err != nil {
 		log.Fatalf("Failed to locate requested module repository: %v.", err)
 	}
-	args = append(args, []string{"-v", absRepository + ":/source"}...)
 
-	// Check whether it has a vendor folder, and if so, use it
+	// Map source code.
+	if config.UseVendoredGOPATh {
+		if os.Getenv("GOPATH") == "" {
+			log.Fatalf("No $GOPATH is set or forwarded to xgo")
+		}
+		// pkgName := resolveImportPath(config.Repository)
+		args = append(args, []string{"-v", fmt.Sprintf("%s:%s", config.Repository, config.Repository)}...)
+		args = append(args, []string{"-e", "EXT_GOPATH=" + os.Getenv("GOPATH")}...)
+		args = append(args, []string{"-e", "GO111MODULE=off"}...)
+	} else {
+		args = append(args, []string{"-v", absRepository + ":/source"}...)
+	}
+
+	// Check whether it has a vendor folder, and if so, use it.
 	vendorPath := absRepository + "/vendor"
-	vendorfolder, err := os.Stat(vendorPath)
-	if !os.IsNotExist(err) && vendorfolder.Mode().IsDir() {
+	vendorFolder, err := os.Stat(vendorPath)
+	if !os.IsNotExist(err) && vendorFolder.Mode().IsDir() {
 		args = append(args, []string{"-e", "FLAG_MOD=vendor"}...)
 		fmt.Printf("Using vendored Go module dependencies\n")
 	}
 
 	args = append(args, []string{image, config.Repository}...)
+	fmt.Println("docker", strings.Join(args, " "))
 	return run(exec.Command("docker", args...))
 }
 
